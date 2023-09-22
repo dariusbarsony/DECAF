@@ -10,8 +10,8 @@ from sklearn import preprocessing
 from sklearn.metrics import precision_score, recall_score, roc_auc_score
 from sklearn.neural_network import MLPClassifier
 
-from decaf.DECAF import DECAF
-from decaf.data import DataModule
+from DECAF.DECAF import DECAF
+from DECAF.data import DataModule
 from .utils import gen_data_nonlinear, load_adult, get_metrics
 
 
@@ -90,66 +90,62 @@ def test_sanity_generate() -> None:
 
 @pytest.mark.parametrize("X,y, df", [load_adult()])
 @pytest.mark.slow
-def test_run_experiments(X: pd.DataFrame, y: pd.DataFrame, df: pd.DataFrame, mode='ftu') -> None:
+def test_run_experiments(d_train: pd.DataFrame, d_test: pd.DataFrame, mode=''):
     """Normalize X"""
-    # X_normalized = (X - X.mean(axis=0)) / X.std(axis=0)
-    min_max_scaler = preprocessing.MinMaxScaler()
-    x_scaled = min_max_scaler.fit_transform(X)
-    X_normalized = pd.DataFrame(x_scaled)
-    baseline_clf = MLPClassifier(hidden_layer_sizes=(100,), activation='relu', solver='adam',
-                                 learning_rate='constant', learning_rate_init=0.001)
-    baseline_clf.fit(X_normalized, y)
 
-    y_pred = baseline_clf.predict(X_normalized)
-
-    print(
-        "baseline scores",
-        precision_score(y, y_pred),
-        recall_score(y, y_pred),
-        roc_auc_score(y, y_pred),
-    )
-
-    dm = DataModule(X_normalized)
+    dm = DataModule(d_train.values)
+    dm_test = DataModule(d_test.values)
 
     # causal structure is in dag_seed
-    dag_seed = [
-        [0, 6],
-        [0, 12],
-        [0, 1],
-        [0, 5],
-        [0, 3],
-        [3, 6],
-        [3, 12],
-        [3, 1],
-        [3, 7],
-        [5, 6],
-        [5, 12],
-        [5, 1],
-        [5, 7],
-        [5, 3],
-        [8, 6],
-        [8, 12],
-        [8, 3],
-        [8, 5],
-        [9, 6],
-        [9, 5],
-        [9, 12],
-        [9, 1],
-        [9, 3],
-        [9, 7],
-        [13, 5],
-        [13, 12],
-        [13, 3],
-        [13, 1],
-        [13, 7],
-    ]
+    dag_seed = [[8, 6], 
+                [8, 14], 
+                [8, 12], 
+                [8, 3], 
+                [8, 5], 
+                [0, 6], 
+                [0, 12], 
+                [0, 14], 
+                [0, 1],
+                [0, 5], 
+                [0, 3], 
+                [0, 7],
+                [9, 6],
+                [9, 5],
+                [9, 14], 
+                [9, 1], 
+                [9, 3],
+                [9, 7], 
+                [13, 5],
+                [13, 12],
+                [13, 3],
+                [13, 1],
+                [13, 14],
+                [13, 7],
+                [5, 6],
+                [5, 12], 
+                [5, 14], 
+                [5, 1],
+                [5, 7], 
+                [5, 3], 
+                [3, 6], 
+                [3, 12],
+                [3, 14],
+                [3, 1],
+                [3, 7], 
+                [6, 14],
+                [12, 14],
+                [1, 14],
+                [7, 14]]
 
-    # edge removal dictionary
-    bias_dict = {14: [9]}  # ftu
+    # no debiasing
+    if mode =='':
+        bias_dict = {}
+    if mode == 'ftu':
+        # edge removal dictionary
+        bias_dict = {14: [9]}  # ftu
     if mode == 'cf':
         bias_dict = {14: [9],
-                     14: [5],
-                     14: [7]}
+                     14: [5]}
     if mode == 'dp':
         bias_dict = {14: [9],
                      14: [5],
@@ -162,6 +158,12 @@ def test_run_experiments(X: pd.DataFrame, y: pd.DataFrame, df: pd.DataFrame, mod
     model = DECAF(
         dm.dims[0],
         dag_seed=dag_seed,
+        lr=0.5e-3,
+        batch_size=64,
+        d_updates=10,
+        alpha=2,
+        rho=2,
+        l1_W=1e-2,
         use_mask=True,
         grad_dag_loss=False,
         lambda_privacy=0,
@@ -169,10 +171,9 @@ def test_run_experiments(X: pd.DataFrame, y: pd.DataFrame, df: pd.DataFrame, mod
         weight_decay=1e-2,
         l1_g=0,
         p_gen=-1,
-        batch_size=100,
     )
 
-    trainer = pl.Trainer(max_epochs=10, logger=False)
+    trainer = pl.Trainer(max_epochs=1, logger=False)
 
     trainer.fit(model, dm)
 
@@ -185,37 +186,14 @@ def test_run_experiments(X: pd.DataFrame, y: pd.DataFrame, df: pd.DataFrame, mod
             .numpy()
     )
 
-    y_synth = baseline_clf.predict(X_synth)
+    X_synth[:, -1] = X_synth[:, -1].astype(np.int8)
 
-    # synth_clf = MLPClassifier(hidden_layer_sizes=(100,), activation='relu', solver='adam',
-    #                           learning_rate='constant', learning_rate_init=0.001)
-    # synth_clf.fit(X_synth, y_synth)
-    # y_pred = synth_clf.predict(X_synth)
-    #
-    # print(
-    #     "synth scores (Precision, Recall, AUROC):",
-    #     precision_score(y, y_pred),
-    #     recall_score(y, y_pred),
-    #     roc_auc_score(y, y_pred),
-    # )
+    synth_dataset = pd.DataFrame(X_synth,
+                                 index=d_train.index,
+                                 columns=d_train.columns)
 
-    print('Getting metrics...')
+    # binarise columns
+    synth_dataset['sex'] = np.round(synth_dataset['sex'])
+    synth_dataset['label'] = np.round(synth_dataset['label'])
 
-    X_synth_df = pd.DataFrame(X_synth, columns=[
-        "age",
-        "workclass",
-        "fnlwgt",
-        "education",
-        "education-num",
-        "marital-status",
-        "occupation",
-        "relationship",
-        "race",
-        "sex",
-        "capital-gain",
-        "capital-loss",
-        "hours-per-week",
-        "native-country"])
-    y_synth_df = pd.DataFrame(y_synth, columns=['label'])
-
-    get_metrics(mode, df, X_synth_df, y_synth_df)
+    return get_metrics(synth_dataset, d_test)

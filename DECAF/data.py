@@ -6,7 +6,7 @@ import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader
 
-import decaf.logger as log
+import DECAF.logger as log
 
 
 class Dataset(torch.utils.data.Dataset):
@@ -38,6 +38,7 @@ class DataModule(pl.LightningDataModule):
         self.num_workers = num_workers
         self.dataset = Dataset(data)
         self.dims = self.dataset.x.shape[1:]
+        self.data_test = None
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(

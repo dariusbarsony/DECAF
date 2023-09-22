@@ -6,6 +6,7 @@ import pandas as pd
 from sklearn.metrics import precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import MinMaxScaler
 
 
 # It will apply a perturbation at each node provided in perturb.
@@ -53,6 +54,8 @@ def gen_data_nonlinear(
 
 def load_adult() -> Tuple[pd.DataFrame, pd.DataFrame]:
     path = "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data"
+    path_test =  "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.test"
+    
     names = [
         "age",
         "workclass",
@@ -70,12 +73,17 @@ def load_adult() -> Tuple[pd.DataFrame, pd.DataFrame]:
         "native-country",
         "label",
     ]
-    df = pd.read_csv(path, names=names, index_col=False)
+    df_train = pd.read_csv(path, names=names, index_col=False)
+    df_test = pd.read_csv(path_test, names=names, index_col=False)[1:]
+
+    df = pd.concat([df_train, df_test])
     df = df.applymap(lambda x: x.strip() if type(x) is str else x)
 
     for col in df:
         if df[col].dtype == "object":
             df = df[df[col] != "?"]
+
+    df["label"].replace({'<=50K.': '<=50K', '>50K.': '>50K'}, inplace=True)
 
     replace = [
         [
@@ -190,56 +198,98 @@ def load_adult() -> Tuple[pd.DataFrame, pd.DataFrame]:
     for row in replace:
         df = df.replace(row, range(len(row)))
 
-    df_values = df.values
-    X = df_values[:, :14].astype(np.uint32)
-    y = df_values[:, 14].astype(np.uint8)
+    df = pd.DataFrame(MinMaxScaler().fit_transform(df),
+                      index=df.index, columns=df.columns)
 
-    return X, y, df
+    return df
+
+# Helper functions from reproducibility study into DECAF (https://github.com/ShuaiWang97/UvA_FACT2022)
+
+columns_adult = [
+    "age",
+    "workclass",
+    "fnlwgt",
+    "education",
+    "education-num",
+    "marital-status",
+    "occupation",
+    "relationship",
+    "race",
+    "sex",
+    "capital-gain",
+    "capital-loss",
+    "hours-per-week",
+    "native-country",
+    "label",
+]
+
+columns_credit = [
+    "male",
+    "age",
+    "debt",
+    "married",
+    "bankcustomer",
+    "educationlevel",
+    "ethnicity",
+    "yearsemployed",
+    "priordefault",
+    "employed",
+    "creditscore",
+    "driverslicense",
+    "citizen",
+    "zip",
+    "income",
+    "approved",
+]
+
+def get_metrics(df_train, df_test):
+
+    X_train, y_train = df_train.drop(columns=['label']), df_train['label']
+    X_test, y_test = df_test.drop(columns=['label']), df_test['label']
+
+    clf = MLPClassifier(verbose=True)
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_test)
+
+    precision = precision_score(y_test, y_pred)
+    recall = recall_score(y_test, y_pred)
+    auroc = roc_auc_score(y_test, y_pred)
+
+    dp = DP(clf, X_test)
+    ftu = FTU(clf, X_test)
+
+    return {'precision': precision, 'recall': recall, 'auroc': auroc,'dp': dp, 'ftu': ftu}
+
+def DP(mlp, X_test, dataset="adult"):
+    """Calculate fairness metric DP"""
+
+    columns = columns_adult if dataset == "adult" else columns_credit
+    X_test_df = pd.DataFrame(X_test, columns=columns[:-1])
+    if 'ethnicity' in X_test_df:
+        X_test_0 = X_test_df[X_test_df["ethnicity"] < 0.5]
+        X_test_1 = X_test_df[X_test_df["ethnicity"] > 0.5]
+    else:
+        X_test_0 = X_test_df[X_test_df["sex"] < 0.5]
+        X_test_1 = X_test_df[X_test_df["sex"] > 0.5]
+    dp = abs(np.mean(mlp.predict(X_test_0)) - np.mean(mlp.predict(X_test_1)))
+
+    return dp
 
 
-def get_metrics(mode, df, X_synth, y_synth):
-    # Split the data into train,test
-    traindf, testdf = train_test_split(df, test_size=0.3)
-    X_train = traindf.loc[:, traindf.columns != 'label']
-    y_train = traindf['label']
-    X_test = testdf.loc[:, testdf.columns != 'label']
-    y_test = testdf['label']
+def FTU(mlp, X_test, dataset="adult"):
+    """Calculate fairness metric FTU"""
 
-    clf_df = MLPClassifier(hidden_layer_sizes=(100,), activation='relu', solver='adam',
-                           learning_rate='constant', learning_rate_init=0.001).fit(X_train, y_train)
-    '''
-    SYNTHETIC DATASET
-    '''
-    # # Make sure the data is representative of the original dataset
-    # synthetic_balanced_1 = synthetic[synthetic.label == 1].sample(22654)
-    # synthetic_balanced_0 = synthetic[synthetic.label == 0].sample(7508)
-    # synthetic_balanced = synthetic_balanced_1.append(synthetic_balanced_0)
+    columns = columns_adult if dataset == "adult" else columns_credit
+    X_test_df = pd.DataFrame(X_test, columns=columns[:-1])
+    if 'ethnicity' in X_test_df:
+        X_test_0 = X_test_df.assign(ethnicity=0)
+        X_test_1 = X_test_df.assign(ethnicity=1)
+    else:
+        X_test_0 = X_test_df.assign(sex=0)
+        X_test_1 = X_test_df.assign(sex=1)
 
-    # Split the data into train,test
-    # X_syn = synthetic_balanced.loc[:, synthetic_balanced.columns != 'label']
-    # y_syn = synthetic_balanced['label']
+    ftu = abs(np.mean(mlp.predict(X_test_0)) - np.mean(mlp.predict(X_test_1)))
 
-    y_pred_syn = clf_df.predict(X_synth)
+    return ftu
 
-    synthetic_pos = X_synth.assign(sex=0)
-    synthetic_neg = X_synth.assign(sex=1)
-
-    x_pos_syn = X_synth[round(X_synth['sex']) == 0][:7508]
-    x_neg_syn = X_synth[round(X_synth['sex']) == 1][:7508]
-
-    pos = clf_df.predict(synthetic_pos)
-    neg = clf_df.predict(synthetic_neg)
-
-    pred_pos_syn = clf_df.predict(x_pos_syn)
-    pred_neg_syn = clf_df.predict(x_neg_syn)
-
-    FTU = np.abs(np.mean(pos - neg))
-    DP = np.mean(pred_pos_syn) - np.mean(pred_neg_syn)
-
-    # Print the obtained statistics
-    print('Statistics for dataset for mode:', mode)
-    print('Precision:', precision_score(y_synth, y_pred_syn, average='binary'))
-    print('Recall:', recall_score(y_synth, y_pred_syn, average='binary'))
-    print('AUROC:', roc_auc_score(y_synth, y_pred_syn))
-    print('FTU:', FTU)
-    print('DP:', DP)
+    
